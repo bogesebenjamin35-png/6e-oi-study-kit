@@ -48,3 +48,9 @@ python tools/chain_view.py 2020-06-15       # opens calls | strike | puts in a s
    study "know" it earlier (look-ahead bias).
 2. NaN means the exchange didn't report — never fill it in.
 3. Use `iv_flag == "ok"` rows for any implied-vol work.
+
+## The side-by-side format (`chainview/`)
+Same data, human layout matching the original May file: one row per strike per expiry
+per day — `call_oi, call_vol, call_settle, call_iv, call_delta | strike | put_...`.
+Zero = no positions on that side. Verified against the original May chain file:
+identical layout, 100% value agreement, totals exact to the contract.

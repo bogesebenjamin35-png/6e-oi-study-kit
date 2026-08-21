@@ -1,44 +1,55 @@
 #!/usr/bin/env python3
-"""chain_view.py — broker-style option-chain screen for any date.
-Run from the repo root:  python tools/chain_view.py 2020-06-15  [--front]
-Writes VIEW_chain_<date>.csv and opens it (macOS `open`; on Windows/Linux open manually).
+"""chain_view.py — broker-style option-chain view, format-matched to Bryan's original
+May file (6e_chains_may1-20_chainview.csv): one row per strike per expiry per day,
+calls on the left, strike in the middle, puts on the right.
+
+Usage (from repo root):
+  python tools/chain_view.py 2020-06-15                    one day -> opens in spreadsheet
+  python tools/chain_view.py 2020-06-01 2020-06-30         a date range -> one combined file
+
+Columns: date, root, contract, expiry_ts, underlying_fut, fut_settle, dte_days, strike,
+         call_oi, call_vol, call_settle, call_iv, call_delta,
+         put_oi,  put_vol,  put_settle,  put_iv,  put_delta
+Note: shows strikes with OPEN POSITIONS (the panel convention); the original May file
+also listed quoted-but-empty strikes as zero rows.
 """
 import subprocess, sys, platform
 from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).parent.parent
-day = sys.argv[1]
-front_only = "--front" in sys.argv
+start = sys.argv[1]
+end = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("-") else start
 
-p = pd.read_parquet(ROOT / "panels" / f"6E_option_chain_daily_{day[:4]}.parquet")
+years = sorted({start[:4], end[:4]})
+p = pd.concat([pd.read_parquet(ROOT / "panels" / f"6E_option_chain_daily_{y}.parquet")
+               for y in years], ignore_index=True)
 p["date"] = pd.to_datetime(p.date)
-d = p[p.date == day].copy()
+d = p[(p.date >= start) & (p.date <= end)].copy()
 if d.empty:
-    sys.exit(f"no session on {day} (weekend/holiday/vendor-absent?) — try a nearby weekday")
+    sys.exit(f"no sessions in {start}..{end}")
 
-d["expiry"] = pd.to_datetime(d.expiry_ts).dt.date
-spot = d.fut_settle.dropna().median()
-calls = d[d.right == "C"].set_index(["expiry", "strike"])
-puts = d[d.right == "P"].set_index(["expiry", "strike"])
-view = pd.DataFrame({
-    "call_OI": calls.open_interest, "call_vol": calls.volume, "call_settle": calls.settlement,
-    "call_iv": calls.iv.round(4),
-}).join(pd.DataFrame({
-    "put_settle": puts.settlement, "put_vol": puts.volume, "put_OI": puts.open_interest,
-    "put_iv": puts.iv.round(4),
-}), how="outer").reset_index()
-view.insert(2, "dte", (pd.to_datetime(view.expiry) - pd.Timestamp(day)).dt.days)
-view["near_spot"] = (view.strike - spot).abs() < 0.01
-view = view.sort_values(["expiry", "strike"])
-if front_only:
-    view = view[view.expiry.isin(sorted(view.expiry.unique())[:3])]
+d["contract_base"] = d.contract.str.split().str[0]          # '1EUK6 P1080' -> '1EUK6'
+d["root"] = d.contract_base.str[:-2]                        # '1EUK6' -> '1EU'
+key = ["date", "root", "contract_base", "expiry_ts", "underlying_fut", "fut_settle",
+       "dte_days", "strike"]
+side = lambda r, pre: d[d.right == r].set_index(key)[["open_interest", "volume", "settlement", "iv", "delta"]] \
+    .rename(columns={"open_interest": f"{pre}_oi", "volume": f"{pre}_vol",
+                     "settlement": f"{pre}_settle", "iv": f"{pre}_iv", "delta": f"{pre}_delta"})
+view = side("C", "call").join(side("P", "put"), how="outer").reset_index()
+view = view.rename(columns={"contract_base": "contract"}).sort_values(["date", "expiry_ts", "strike"])
+for c in ("call_oi", "call_vol", "put_oi", "put_vol"):
+    view[c] = view[c].fillna(0)          # no positions on that side = 0 (May-file convention)
+for c in ("call_iv", "put_iv", "call_delta", "put_delta"):
+    view[c] = view[c].round(4)
 
-out = ROOT / f"VIEW_chain_{day}.csv"
-cols = ["expiry", "dte", "call_OI", "call_vol", "call_settle", "call_iv",
-        "strike", "put_iv", "put_settle", "put_vol", "put_OI", "near_spot"]
+cols = ["date", "root", "contract", "expiry_ts", "underlying_fut", "fut_settle",
+        "dte_days", "strike", "call_oi", "call_vol", "call_settle", "call_iv",
+        "call_delta", "put_oi", "put_vol", "put_settle", "put_iv", "put_delta"]
+name = f"VIEW_chain_{start}" + ("" if end == start else f"_{end}")
+out = ROOT / f"{name}.csv"
 view[cols].to_csv(out, index=False)
-print(f"{day}: {len(view)} strike-expiry lines | spot ~{spot:.4f} | "
-      f"call OI {view.call_OI.sum():,.0f} vs put OI {view.put_OI.sum():,.0f} -> {out.name}")
-if platform.system() == "Darwin":
+print(f"{start}..{end}: {len(view):,} strike lines | {view.date.nunique()} session(s) | "
+      f"call OI {view.call_oi.sum():,.0f} vs put OI {view.put_oi.sum():,.0f} -> {out.name}")
+if platform.system() == "Darwin" and end == start:
     subprocess.run(["open", str(out)])
